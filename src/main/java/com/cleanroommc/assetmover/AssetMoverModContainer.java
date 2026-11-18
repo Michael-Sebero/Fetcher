@@ -25,10 +25,10 @@ public class AssetMoverModContainer extends DummyModContainer {
         super(new ModMetadata());
         ModMetadata metadata = this.getMetadata();
         metadata.modId = "assetmover";
-        metadata.name = "AssetMover";
-        metadata.description = "Allows acquiring of vanilla/mod assets at runtime without potentially violating licenses.";
+        metadata.name = "Fetcher";
+        metadata.description = "Fetches vanilla/mod assets at runtime, quickly and safely, without potentially violating licenses.";
         metadata.version = "@{VERSION}";
-        metadata.url = "https://github.com/CleanroomMC/AssetMover";
+        metadata.url = "https://github.com/Michael-Sebero/Fetcher";
         metadata.authorList = Collections.singletonList("CleanroomMC");
         metadata.credits = "Rongmario";
         metadata.logoFile = "/assetmover/icon.png";

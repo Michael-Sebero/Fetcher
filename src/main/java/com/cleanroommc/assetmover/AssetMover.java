@@ -26,16 +26,17 @@ import net.minecraftforge.fml.common.ProgressManager.ProgressBar;
 
 import java.io.File;
 import java.io.IOException;
-import java.nio.file.FileSystem;
-import java.nio.file.FileSystems;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Enumeration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
@@ -45,12 +46,13 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.function.Function;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
+import java.util.regex.Pattern;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 
 final class AssetMover implements AssetMoverAPI {
 
-    static final Logger LOGGER = LogManager.getLogger("AssetMover");
+    static final Logger LOGGER = LogManager.getLogger("Fetcher");
     static final Path PACK = (Launch.minecraftHome == null ? new File(".") : Launch.minecraftHome)
         .toPath()
         .resolve("assetmover");
@@ -58,14 +60,14 @@ final class AssetMover implements AssetMoverAPI {
     private static final String VERSION_MANIFEST = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
     private static final String RESOURCES = "https://resources.download.minecraft.net/";
     private static final String MAVEN_CENTRAL = "https://repo.maven.apache.org/maven2";
-    private static final int THREADS = Integer.getInteger(
-        "cleanroom.asset-mover.threads", Math.max(4, Runtime.getRuntime().availableProcessors() * 2)
-    );
+    private static final Pattern OBJECT_HASH = Pattern.compile("[0-9a-f]{40}");
+    private static final Pattern VERSION = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._+ -]*");
 
     private static boolean movedClientAssets;
 
     private final List<Request> requests = new ArrayList<>();
     private final Map<List<?>, CompletableFuture<?>> shared = new ConcurrentHashMap<>();
+    private final Set<Path> downloads = ConcurrentHashMap.newKeySet();
 
     private ExecutorService executor;
 
@@ -89,19 +91,45 @@ final class AssetMover implements AssetMoverAPI {
         mover.run();
     }
 
+    /**
+     * Resolves a destination within the pack. A destination is never allowed to leave it.
+     */
+    static Path destination(String destination) {
+        Path root = PACK.toAbsolutePath().normalize();
+        Path resolved = root.resolve(destination).normalize();
+        if (resolved.equals(root) || !resolved.startsWith(root)) {
+            throw new IllegalArgumentException("Destination '" + destination + "' is not inside the pack");
+        }
+        return resolved;
+    }
+
     private static void extract(Path archive, Map<String, String> assets, Object source) throws IOException {
-        try (FileSystem fs = FileSystems.newFileSystem(archive, (ClassLoader) null)) {
-            Path root = fs.getPath("/");
-            Path folder = singleFolder(root);
+        try (ZipFile zip = new ZipFile(archive.toFile())) {
+            String root = null;
+            boolean rootKnown = false;
             for (Map.Entry<String, String> asset : assets.entrySet()) {
-                Path from = root.resolve(asset.getKey());
-                if (!Files.exists(from) && folder != null) {
-                    from = folder.resolve(asset.getKey());
+                String name = asset.getKey();
+                while (name.startsWith("/")) {
+                    name = name.substring(1);
                 }
-                if (Files.exists(from)) {
-                    AssetMoverHelper.copy(from, PACK.resolve(asset.getValue()));
-                } else {
+                ZipEntry entry = zip.getEntry(name);
+                if (entry == null) {
+                    if (!rootKnown) {
+                        root = singleRoot(zip);
+                        rootKnown = true;
+                    }
+                    entry = root == null ? null : zip.getEntry(root + name);
+                }
+                if (entry == null || entry.isDirectory()) {
                     LOGGER.error("Could not find '{}' in {}", asset.getKey(), source);
+                    continue;
+                }
+                if (entry.getSize() > AssetMoverHelper.MAX_ASSET) {
+                    LOGGER.error("Skipping '{}' in {}, it is over the size limit", asset.getKey(), source);
+                    continue;
+                }
+                try (InputStream in = zip.getInputStream(entry)) {
+                    AssetMoverHelper.store(in, destination(asset.getValue()), AssetMoverHelper.MAX_ASSET);
                 }
             }
         }
@@ -109,22 +137,43 @@ final class AssetMover implements AssetMoverAPI {
 
     /**
      * Archives such as GitHub's wrap everything in one folder, which paths are allowed to omit.
+     *
+     * @return that folder with a trailing slash, or {@code null} if there is no such folder
      */
     private static @Nullable
-    Path singleFolder(Path root) throws IOException {
-        try (Stream<Path> children = Files.list(root)) {
-            List<Path> first = children.limit(2).collect(Collectors.toList());
-            return first.size() == 1 && Files.isDirectory(first.get(0)) ? first.get(0) : null;
+    String singleRoot(ZipFile zip) {
+        String root = null;
+        for (Enumeration<? extends ZipEntry> entries = zip.entries(); entries.hasMoreElements();) {
+            String name = entries.nextElement().getName();
+            int slash = name.indexOf('/');
+            if (slash < 0) {
+                return null;
+            }
+            String folder = name.substring(0, slash + 1);
+            if (root == null) {
+                root = folder;
+            } else if (!root.equals(folder)) {
+                return null;
+            }
+        }
+        return root;
+    }
+
+    private static void requireVersion(String version) {
+        if (!VERSION.matcher(version).matches() || version.contains("..")) {
+            throw new IllegalArgumentException("Invalid version '" + version + "'");
         }
     }
 
     @Override
     public AssetRequest fromJava(String version) {
+        requireVersion(version);
         return new JavaAssets(version);
     }
 
     @Override
     public AssetRequest fromBedrock(String version) {
+        requireVersion(version);
         return new Archive(
             "bedrock", Arrays.asList("bedrock", version), "Minecraft Bedrock " + version,
             () -> GitHost.GITHUB.archiveUrl("Mojang/bedrock-samples", "v" + version)
@@ -195,7 +244,7 @@ final class AssetMover implements AssetMoverAPI {
         }
         long start = System.currentTimeMillis();
         executor = Executors.newFixedThreadPool(
-            THREADS, new ThreadFactoryBuilder().setNameFormat("AssetMover #%d").setDaemon(true).build()
+            AssetMoverHelper.THREADS, new ThreadFactoryBuilder().setNameFormat("Fetcher #%d").setDaemon(true).build()
         );
         BlockingQueue<Request> done = new LinkedBlockingQueue<>();
         for (Request request : requests) {
@@ -207,7 +256,7 @@ final class AssetMover implements AssetMoverAPI {
             });
         }
         // The splash screen renders progress bars from another thread, so they are only stepped from this one
-        ProgressBar bar = ProgressManager.push("AssetMover", requests.size());
+        ProgressBar bar = ProgressManager.push("Fetcher", requests.size());
         try {
             for (int i = 1; i <= requests.size(); i++) {
                 Request request = done.take();
@@ -219,8 +268,19 @@ final class AssetMover implements AssetMoverAPI {
         } finally {
             ProgressManager.pop(bar);
             executor.shutdownNow();
+            downloads.forEach(AssetMoverHelper::deleteQuietly);
+            downloads.clear();
         }
         LOGGER.info("Moved assets in {} ms", System.currentTimeMillis() - start);
+    }
+
+    /**
+     * Downloads to a temporary file that is deleted once everything is moved.
+     */
+    private AssetMoverHelper.Downloaded fetch(String url, String source) throws IOException {
+        AssetMoverHelper.Downloaded downloaded = AssetMoverHelper.download(url, source, null, "SHA-256");
+        downloads.add(downloaded.file);
+        return downloaded;
     }
 
     private <T> CompletableFuture<T> async(Callable<T> task) {
@@ -274,19 +334,19 @@ final class AssetMover implements AssetMoverAPI {
 
         @Override
         public AssetRequest move(Collection<String> paths) {
-            paths.forEach(path -> assets.put(path, path));
+            paths.forEach(path -> put(path, path));
             return this;
         }
 
         @Override
         public AssetRequest move(Map<String, String> assets) {
-            this.assets.putAll(assets);
+            assets.forEach(this::put);
             return this;
         }
 
         @Override
         public AssetRequest moveAs(String source, String destination) {
-            assets.put(source, destination);
+            put(source, destination);
             return this;
         }
 
@@ -311,7 +371,7 @@ final class AssetMover implements AssetMoverAPI {
         final CompletableFuture<?> start() {
             Map<String, String> pending = new LinkedHashMap<>();
             assets.forEach((source, destination) -> {
-                if (overwrite || !Files.exists(PACK.resolve(destination))) {
+                if (overwrite || !Files.exists(destination(destination))) {
                     pending.put(source, destination);
                 }
             });
@@ -319,6 +379,11 @@ final class AssetMover implements AssetMoverAPI {
         }
 
         abstract CompletableFuture<?> start(Map<String, String> pending);
+
+        private void put(String source, String destination) {
+            destination(destination);
+            assets.put(source, destination);
+        }
 
     }
 
@@ -343,9 +408,12 @@ final class AssetMover implements AssetMoverAPI {
 
         @Override
         CompletableFuture<?> start(Map<String, String> pending) {
-            return shared(source, () -> AssetMoverHelper.download(url.call(), type)).thenCompose(file -> async(() -> {
-                AssetMoverHelper.verify(file, algorithm, checksum);
-                extract(file, pending, this);
+            return shared(source, () -> fetch(url.call(), type)).thenCompose(downloaded -> async(() -> {
+                AssetMoverHelper.verify(downloaded, algorithm, checksum);
+                if (checksum == null) {
+                    LOGGER.info("SHA-256 of {} is {}, pass it to verify() to pin it", description, downloaded.hash());
+                }
+                extract(downloaded.file, pending, this);
                 return null;
             }));
         }
@@ -380,8 +448,12 @@ final class AssetMover implements AssetMoverAPI {
                         fromJar.put(source, destination);
                     } else {
                         String hash = object.get("hash").getAsString();
+                        if (!OBJECT_HASH.matcher(hash).matches()) {
+                            LOGGER.error("Skipping '{}', its hash '{}' in the asset index is malformed", source, hash);
+                            return;
+                        }
                         tasks.add(async(() -> {
-                            moveObject(hash, PACK.resolve(destination));
+                            moveObject(hash, destination(destination));
                             return null;
                         }));
                     }
@@ -427,11 +499,18 @@ final class AssetMover implements AssetMoverAPI {
 
         private void moveObject(String hash, Path destination) throws IOException {
             Path local = minecraft.resolve("assets").resolve("objects").resolve(hash.substring(0, 2)).resolve(hash);
-            Path file = Files.exists(local) && AssetMoverHelper.matches(local, "SHA-1", hash)
-                ? local
-                : AssetMoverHelper.download(RESOURCES + hash.substring(0, 2) + "/" + hash, "java");
-            AssetMoverHelper.verify(file, "SHA-1", hash);
-            AssetMoverHelper.copy(file, destination);
+            if (AssetMoverHelper.copyVerified(local, destination, "SHA-1", hash)) {
+                return;
+            }
+            AssetMoverHelper.Downloaded downloaded = AssetMoverHelper.download(
+                RESOURCES + hash.substring(0, 2) + "/" + hash, "java", destination.getParent(), "SHA-1"
+            );
+            try {
+                AssetMoverHelper.verify(downloaded, "SHA-1", hash);
+                AssetMoverHelper.commit(downloaded.file, destination);
+            } finally {
+                AssetMoverHelper.deleteQuietly(downloaded.file);
+            }
         }
 
         private CompletableFuture<Path> clientJar(JsonObject json) {
@@ -439,9 +518,12 @@ final class AssetMover implements AssetMoverAPI {
             String sha1 = client.get("sha1").getAsString();
             Path local = minecraft.resolve("versions").resolve(version).resolve(version + ".jar");
             return shared(Arrays.asList("client", version), () -> {
-                Path jar = Files.exists(local) && AssetMoverHelper.matches(local, "SHA-1", sha1) ? local : AssetMoverHelper.download(client.get("url").getAsString(), "java");
-                AssetMoverHelper.verify(jar, "SHA-1", sha1);
-                return jar;
+                if (Files.exists(local) && AssetMoverHelper.matches(local, "SHA-1", sha1)) {
+                    return local;
+                }
+                AssetMoverHelper.Downloaded downloaded = fetch(client.get("url").getAsString(), "java");
+                AssetMoverHelper.verify(downloaded, "SHA-1", sha1);
+                return downloaded.file;
             });
         }
 
@@ -450,11 +532,11 @@ final class AssetMover implements AssetMoverAPI {
     private final class SingleFile extends Request implements SingleAssetRequest {
 
         private final String url;
-        private final String destination;
+        private final Path to;
 
         SingleFile(String url, String destination) {
             this.url = url;
-            this.destination = destination;
+            this.to = destination(destination);
         }
 
         @Override
@@ -481,14 +563,19 @@ final class AssetMover implements AssetMoverAPI {
 
         @Override
         CompletableFuture<?> start() {
-            Path to = PACK.resolve(destination);
             if (!overwrite && Files.exists(to)) {
                 return CompletableFuture.completedFuture(null);
             }
             return async(() -> {
-                Path file = AssetMoverHelper.download(url, "url");
-                AssetMoverHelper.verify(file, algorithm, checksum);
-                AssetMoverHelper.copy(file, to);
+                AssetMoverHelper.Downloaded downloaded = AssetMoverHelper.download(
+                    url, "url", to.getParent(), algorithm != null ? algorithm : "SHA-256"
+                );
+                try {
+                    AssetMoverHelper.verify(downloaded, algorithm, checksum);
+                    AssetMoverHelper.commit(downloaded.file, to);
+                } finally {
+                    AssetMoverHelper.deleteQuietly(downloaded.file);
+                }
                 return null;
             });
         }

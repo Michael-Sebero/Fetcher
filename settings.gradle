@@ -20,4 +20,4 @@ plugins {
     id 'com.cleanroommc.conventions.settings' version '1.4.4'
 }
 
-rootProject.name = 'assetmover'
+rootProject.name = 'fetcher'

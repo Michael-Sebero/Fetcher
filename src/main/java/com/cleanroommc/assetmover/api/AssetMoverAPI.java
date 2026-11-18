@@ -78,14 +78,14 @@ public interface AssetMoverAPI {
     AssetRequest fromMavenCentral(String coordinate);
 
     /**
-     * Any zip/jar reachable over http(s). If the archive has a single root folder, paths may omit it.
+     * Any zip/jar reachable over https (plain http only for localhost, unless {@code -Dcleanroom.asset-mover.allow-insecure=true}). If the archive has a single root folder, paths may omit it.
      *
      * @param archiveUrl the url of the zip or jar
      */
     AssetRequest fromUrl(String archiveUrl);
 
     /**
-     * A single file reachable over http(s), written straight to {@code destination}.
+     * A single file reachable over https (see {@link #fromUrl(String)}), written straight to {@code destination}.
      *
      * @param fileUrl the url of the file
      * @param destination the path within the pack

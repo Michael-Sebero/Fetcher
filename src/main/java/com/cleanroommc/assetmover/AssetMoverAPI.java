@@ -102,7 +102,7 @@ public final class AssetMoverAPI {
     private static void validateLoadingState() {
         if (Loader.instance().hasReachedState(LoaderState.PREINITIALIZATION)) {
             throw new RuntimeException(
-                "AssetMover operations can only be performed during FMLConstructionEvent or earlier!"
+                "Fetcher operations can only be performed during FMLConstructionEvent or earlier!"
             );
         }
     }
@@ -112,7 +112,7 @@ public final class AssetMoverAPI {
             ModContainer mod = Loader.instance().activeModContainer();
             AssetMover.LOGGER.error(
                 "{} called the 2.x AssetMover API after MoveAssetEvent.Client fired, so its assets are not moved this launch. " +
-                    "Update it to AssetMover 3.x and queue assets in MoveAssetEvent.",
+                    "Update it to the 3.x API and queue assets in MoveAssetEvent.",
                 mod == null ? "A mod" : mod.getModId(), new Throwable("Caller")
             );
             return;

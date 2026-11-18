@@ -13,6 +13,7 @@ import java.util.Map;
  * <p>The request is queued the moment it is created, there is nothing to submit. Adding no assets to it simply
  * makes it a no-op, and its source is never downloaded.</p>
  * <p>All destinations are relative to {@code /assetmover}, which is a hidden resource pack.
+ * A destination that would leave it, e.g. through {@code ..}, is rejected with an {@link IllegalArgumentException}.
  */
 public interface AssetRequest {
 

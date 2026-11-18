@@ -32,6 +32,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class AssetMoverTest {
 
@@ -57,6 +58,23 @@ class AssetMoverTest {
                 } catch (InterruptedException ignored) {
                     // Interrupted by server.stop, the client has already given up
                 }
+                exchange.close();
+                return;
+            }
+            if (path.startsWith("/redirect/")) {
+                exchange.getResponseHeaders().add("Location", path.substring("/redirect".length()));
+                exchange.sendResponseHeaders(302, -1);
+                exchange.close();
+                return;
+            }
+            if (path.equals("/truncated")) {
+                exchange.sendResponseHeaders(200, 100);
+                exchange.getResponseBody().write(new byte[10]);
+                exchange.close();
+                return;
+            }
+            if (path.equals("/flaky") && HITS.get(path).get() == 1) {
+                exchange.sendResponseHeaders(503, -1);
                 exchange.close();
                 return;
             }
@@ -183,6 +201,74 @@ class AssetMoverTest {
             System.clearProperty("cleanroom.asset-mover.url.timeout");
         }
         assertThat(pack("stall.txt")).doesNotExist();
+    }
+
+    @Test
+    void rejectsDestinationsOutsideThePack() {
+        AssetMover mover = new AssetMover();
+        assertThatThrownBy(() -> mover.fromUrl(base + "/repo.zip").moveAs("a.txt", "../escaped.txt")).isInstanceOf(
+            IllegalArgumentException.class
+        );
+        assertThatThrownBy(() -> mover.fromUrl(base + "/repo.zip").moveAs("a.txt", "x/../../escaped.txt")).isInstanceOf(
+            IllegalArgumentException.class
+        );
+        assertThatThrownBy(() -> mover.fromUrlFile(base + "/file.txt", "/tmp/escaped.txt")).isInstanceOf(
+            IllegalArgumentException.class
+        );
+        assertThatThrownBy(() -> mover.fromJava("../1.12.2")).isInstanceOf(IllegalArgumentException.class);
+        assertThat(home.resolve("escaped.txt")).doesNotExist();
+    }
+
+    @Test
+    void refusesInsecureAndNonHttpUrls() {
+        AssetMover mover = new AssetMover();
+        mover.fromUrlFile("http://example.com/file.txt", "insecure/http.txt");
+        mover.fromUrlFile("file:///etc/hostname", "insecure/file.txt");
+        mover.run();
+        assertThat(pack("insecure/http.txt")).doesNotExist();
+        assertThat(pack("insecure/file.txt")).doesNotExist();
+    }
+
+    @Test
+    void followsRedirects() throws IOException {
+        FILES.put("/target.txt", "t".getBytes(StandardCharsets.UTF_8));
+        AssetMover mover = new AssetMover();
+        mover.fromUrlFile(base + "/redirect/target.txt", "redirect/target.txt");
+        mover.run();
+        assertThat(read("redirect/target.txt")).isEqualTo("t");
+    }
+
+    @Test
+    void neverLeavesATruncatedFileBehind() throws IOException {
+        AssetMover mover = new AssetMover();
+        mover.fromUrlFile(base + "/truncated", "truncated/file.txt");
+        mover.run();
+        assertThat(pack("truncated/file.txt")).doesNotExist();
+        try (java.util.stream.Stream<Path> left = Files.walk(pack("truncated"))) {
+            assertThat(left.filter(Files::isRegularFile)).isEmpty();
+        } catch (java.nio.file.NoSuchFileException e) {
+            // Nothing was created, which is just as good
+        }
+    }
+
+    @Test
+    void retriesServerErrors() throws IOException {
+        FILES.put("/flaky", "ok".getBytes(StandardCharsets.UTF_8));
+        AssetMover mover = new AssetMover();
+        mover.fromUrlFile(base + "/flaky", "flaky/file.txt");
+        mover.run();
+        assertThat(read("flaky/file.txt")).isEqualTo("ok");
+        assertThat(HITS.get("/flaky")).hasValue(2);
+    }
+
+    @Test
+    void leavesNoPartialFilesAfterMoving() throws IOException {
+        AssetMover mover = new AssetMover();
+        mover.fromUrl(base + "/repo.zip").moveAs("a.txt", "clean/a.txt");
+        mover.run();
+        try (java.util.stream.Stream<Path> files = Files.list(pack("clean"))) {
+            assertThat(files.map(f -> f.getFileName().toString())).containsExactly("a.txt");
+        }
     }
 
     @Test

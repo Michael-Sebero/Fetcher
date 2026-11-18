@@ -12,7 +12,7 @@ import net.minecraftforge.fml.relauncher.IFMLLoadingPlugin;
 
 import java.util.Map;
 
-@IFMLLoadingPlugin.Name("AssetMover")
+@IFMLLoadingPlugin.Name("Fetcher")
 @IFMLLoadingPlugin.MCVersion(ForgeVersion.mcVersion)
 public class AssetMoverCore implements IFMLLoadingPlugin {
 

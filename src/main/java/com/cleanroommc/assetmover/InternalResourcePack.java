@@ -34,7 +34,7 @@ public class InternalResourcePack extends FolderResourcePack implements FMLConta
 
     @Override
     public String getPackName() {
-        return "AssetMoverPack";
+        return "FetcherPack";
     }
 
     @Override
@@ -49,7 +49,7 @@ public class InternalResourcePack extends FolderResourcePack implements FMLConta
         JsonObject metadata = new JsonObject();
         JsonObject packObj = new JsonObject();
         metadata.add("pack", packObj);
-        packObj.addProperty("description", "Includes assets moved by AssetMover.");
+        packObj.addProperty("description", "Includes assets fetched by Fetcher.");
         packObj.addProperty("pack_format", 2);
         return metadataSerializer.parseMetadataSection(metadataSectionName, metadata);
     }

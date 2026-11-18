@@ -9,7 +9,7 @@ plugins {
 
 conventions {
     beginFrom = 2022
-    repositoryUrl = 'https://github.com/CleanroomMC/AssetMover'
+    repositoryUrl = 'https://github.com/Michael-Sebero/Fetcher'
 }
 
 tokenEnvoy {
@@ -38,6 +38,16 @@ jar {
             'ForceLoadAsMod': true
         )
     }
+}
+
+// Uncommitted changes make the versioning plugin append '.dirty', which does not belong in a file name
+tasks.withType(Jar).configureEach {
+    archiveVersion = provider { project.version.toString().replace('.dirty', '') }
+}
+
+// Only the runtime jar and the dev jar are wanted
+tasks.matching { it.name in ['sourcesJar', 'javadocJar'] }.configureEach {
+    enabled = false
 }
 
 idea {

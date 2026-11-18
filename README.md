@@ -1,12 +1,17 @@
-# AssetMover
+# Fetcher
 
-***Allows acquiring of vanilla/mod assets at runtime instead of including them in builds potentially violating licenses.***
+***Fetches vanilla/mod assets at runtime instead of including them in builds potentially violating licenses.***
+
+Fetcher is a faster, stricter fork of CleanroomMC's AssetMover. The code, API, mod id (`assetmover`), asset folder and
+`cleanroom.asset-mover.*` properties keep the AssetMover name, so mods written for AssetMover work unchanged.
 
 ### Features:
 
 1. Downloading assets from Minecraft (Java and Bedrock), CurseForge, Modrinth, GitHub, Maven repositories and URLs.
 2. Locating these in `.minecraft/assetmover` folder resource pack that is hidden in-game.
 3. Dev environment compatibility.
+4. Fast: many parallel downloads over reused connections, JSON fetched gzipped, every file hashed while it downloads.
+5. Safe: see below.
 
 ### For Developers:
 
@@ -50,4 +55,13 @@ Each download gives up after 30 seconds without a connection or without data. Ov
 | `cleanroom.asset-mover.maven.timeout`     | `fromMaven`, `fromMavenCentral`         |
 | `cleanroom.asset-mover.url.timeout`       | `fromUrl`, `fromUrlFile`                |
 
-Downloads run on `max(4, cores * 2)` threads, which `cleanroom.asset-mover.threads` overrides.
+Downloads run on `min(32, max(8, cores * 4))` threads, which `cleanroom.asset-mover.threads` overrides.
+
+### Safety
+
+- **https only.** Plain `http` and other schemes such as `file:` are refused, and so is a redirect that downgrades to them. `http://localhost` is exempt, and `-Dcleanroom.asset-mover.allow-insecure=true` permits any http.
+- **Nothing escapes the pack.** A destination such as `../../mods/x.jar` or an absolute path is rejected with an `IllegalArgumentException`, as is a Minecraft version that is not a plain version id.
+- **Never a half-written asset.** Files are written under a temporary name and moved into place only once complete and verified, so an interrupted launch cannot leave a truncated file that the next launch would skip as already present. Truncated downloads are detected and retried.
+- **Verified before they land.** Mojang's assets are checked against Mojang's SHA-1, including the copies found in your launcher's folder. Requests with `verify(...)` move nothing out of a file that fails it. Without one, the SHA-256 of each archive is logged so it can be pinned.
+- **Bounded.** A download over 1 GiB or a single extracted asset over 512 MiB is aborted, which `cleanroom.asset-mover.max-download` and `cleanroom.asset-mover.max-asset` (in MiB) override. Asset indexes are validated before their hashes are used in paths and urls.
+- **Resilient.** Responses of 429 and 5xx, and dropped connections, are retried up to 3 times (`cleanroom.asset-mover.attempts`). Timeouts are not.
